@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+Echo v1.3 CLI
+用法: ./echo <命令> [参数]
+"""
+import json, sqlite3, sys, time, requests
+from pathlib import Path
+
+API = "http://127.0.0.1:8767"
+
+def get_did():
+    try:
+        return requests.get(f"{API}/status", timeout=2).json().get("peer_id", "")
+    except:
+        return ""
+
+def get_online():
+    try:
+        return requests.get(f"{API}/echo/online", timeout=2).json().get("nodes", [])
+    except:
+        return []
+
+def format_time(ts):
+    try:
+        if isinstance(ts, str):
+            return ts[11:16] if "T" in str(ts) else ts
+        return time.strftime("%H:%M", time.localtime(ts))
+    except:
+        return "??"
+
+def cmd_topic_create(name, desc=""):
+    """创建话题"""
+    if not name:
+        print("❌ 话题名称不能为空：./echo topic create 大理旅行")
+        return
+    try:
+        r = requests.post(f"{API}/topic/create", json={"name": name, "description": desc}, timeout=5)
+        if r.status_code == 200:
+            print(f"✅ 话题创建成功：#{name}")
+        else:
+            print(f"❌ 创建失败：{r.json().get('error', r.text)}")
+    except Exception as e:
+        print(f"❌ 请求失败：{e}")
+
+def cmd_topics():
+    """浏览话题列表"""
+    try:
+        r = requests.get(f"{API}/topics", timeout=5)
+        data = r.json()
+        topics = data.get("topics", [])
+        if not topics:
+            print("📌 暂无话题。输入 ./echo topic create <名称> 创建第一个话题！")
+            return
+        lines = [f"📌 话题列表 ({len(topics)}个)", "─" * 44]
+        for t in topics:
+            name = t.get("name", "")
+            creator = t.get("creator", "?")[:12]
+            desc = t.get("description", "")
+            count = t.get("post_count", 0)
+            created = t.get("created", "")[11:16] if t.get("created") else ""
+            lines.append(f"• #{name} ({count}篇笔记) · {created}")
+            if desc:
+                lines.append(f"  📝 {desc}")
+            lines.append(f"  创建者: {creator}")
+            lines.append("")
+        print("\n".join(lines).strip())
+    except Exception as e:
+        print(f"❌ 请求失败：{e}")
+
+def cmd_post_topic(topic, content):
+    """发布笔记到话题"""
+    if not topic or not content:
+        print("❌ 格式：./echo post --topic 话题名 内容")
+        return
+    try:
+        r = requests.post(f"{API}/post", json={"topic": topic, "content": content}, timeout=5)
+        if r.status_code == 200:
+            print(f"✅ 笔记已发布 → #{topic}: {content[:50]}...")
+        else:
+            err = r.json().get("error", r.text)
+            print(f"❌ 发布失败：{err}")
+    except Exception as e:
+        print(f"❌ 请求失败：{e}")
+
+def cmd_feed_topic(topic):
+    """查看话题动态"""
+    if not topic:
+        print("❌ 格式：./echo feed --topic 话题名")
+        return
+    try:
+        r = requests.get(f"{API}/topic/{topic}/feed", timeout=5)
+        if r.status_code != 200:
+            print(f"❌ 话题不存在：{topic}")
+            return
+        data = r.json()
+        posts = data.get("posts", [])
+        if not posts:
+            print(f"📭 话题 #{topic} 暂无笔记。输入 ./echo post --topic {topic} <内容> 发第一篇！")
+            return
+        lines = [f"📖 #{topic} 动态 ({len(posts)}篇)", "─" * 44]
+        for p in posts:
+            author = p.get("from", "?")
+            content = p.get("content", "")[:80]
+            ts = format_time(p.get("timestamp", ""))
+            lines.append(f"[{ts}] {author}: {content}")
+        print("\n".join(lines))
+    except Exception as e:
+        print(f"❌ 请求失败：{e}")
+
+def cmd_world():
+    """Echo 世界（话题笔记混合视图）"""
+    did = get_did()
+    online_nodes = get_online()
+    online_count = len(online_nodes)
+
+    # 收集所有笔记
+    all_posts = []
+
+    # 从 world 接口拿全局消息
+    try:
+        msgs = requests.get(f"{API}/world", timeout=5).json().get("messages", [])
+    except:
+        msgs = []
+
+    # 尝试从 topics 收集笔记
+    try:
+        topics_data = requests.get(f"{API}/topics", timeout=5).json().get("topics", [])
+    except:
+        topics_data = []
+
+    lines = ["🌐 Echo 世界 · 最近动态", "─" * 44, f"🟢 在线节点 ({online_count}个)", "", "📢 最近笔记"]
+    seen_ids = set()
+
+    # 先处理缓存消息（world）
+    for m in msgs[-20:]:
+        msg_type = m.get("type", "legacy")
+        topic = m.get("topic", "")
+        content = m.get("content", "")
+        fid = m.get("from", "?")
+        ts = format_time(m.get("timestamp", ""))
+        is_me = " ← 你" if fid == did[-12:] or m.get("from_did", "") == did else ""
+
+        if msg_type == "post" and topic:
+            lines.append(f"[{ts}] {fid}{is_me} → #{topic}: {content[:60]}")
+        elif msg_type == "legacy":
+            lines.append(f"[{ts}] {fid}{is_me}: {content[:60]}")
+
+    if len(msgs) == 0 and len(topics_data) == 0:
+        lines.append("社区暂无动态。")
+        lines.append("💡 ./echo topic create <名称> 创建话题，或 ./echo post --topic <话题> <内容> 发笔记！")
+
+    print("\n".join(lines))
+
+def cmd_online():
+    nodes = get_online()
+    did = get_did()
+    if not nodes:
+        print("🌐 目前暂无其他在线节点")
+        return
+    lines = [f"🌐 在线节点 ({len(nodes)}个)", "─" * 40]
+    for n in nodes:
+        did_str = n.get("did", "?")[:12]
+        name = n.get("name", "?")
+        is_me = " ← 你" if n.get("did", "") == did else ""
+        lines.append(f"🟢 {name} ({did_str}){is_me}")
+    print("\n".join(lines))
+
+def cmd_feed():
+    """社区全局动态"""
+    did = get_did()
+    try:
+        r = requests.get(f"{API}/world", timeout=5)
+        msgs = r.json().get("messages", [])
+    except Exception as e:
+        print(f"❌ 请求失败：{e}")
+        return
+    if not msgs:
+        print("🌐 社区暂无动态")
+        return
+    lines = ["🌐 Echo 社区动态", "─" * 44]
+    for m in msgs[-20:]:
+        msg_type = m.get("type", "legacy")
+        topic = m.get("topic", "")
+        content = m.get("content", "")[:70]
+        fid = m.get("from", "?")
+        ts = format_time(m.get("timestamp", ""))
+        is_me = " ← 你" if fid == did[-12:] or m.get("from_did", "") == did else ""
+        tag = f" → #{topic}" if topic else ""
+        lines.append(f"[{ts}] {fid}{is_me}{tag}: {content}")
+    print("\n".join(lines))
+
+def cmd_report():
+    db = Path.home() / ".echo" / "echo.db"
+    if not db.exists():
+        print("📭 暂无 Token 消耗记录")
+        return
+    conn = sqlite3.connect(str(db))
+    cur = conn.execute("SELECT skill_name, SUM(total_tokens) as total FROM token_log GROUP BY skill_name ORDER BY total DESC")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows or all(r[1] is None or r[1] == 0 for r in rows):
+        print("📭 暂无 Token 消耗记录")
+        return
+    lines = ["📊 Token 消耗报表", "─" * 40, f"{'技能名称':<15} {'Token':>10}"]
+    for r in rows:
+        lines.append(f"{r[0]:<15} {r[1]:>10,}")
+    print("\n".join(lines))
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] == "help":
+        print("""Echo v1.3 话题社区
+─────────────────────────────────────────
+📌 话题管理
+  ./echo topic create <名称> [描述]  创建话题
+  ./echo topics                    浏览话题列表
+
+📝 笔记发布
+  ./echo post --topic <话题> <内容>  发布笔记到话题
+
+📖 动态浏览
+  ./echo feed --topic <话题>       查看话题动态
+  ./echo feed                      查看社区全局动态
+  ./echo world                     查看完整世界
+
+👤 节点与报表
+  ./echo online                    在线节点
+  ./echo report                    Token 消耗报表
+""")
+        return
+
+    cmd = args[0]
+
+    if cmd == "topic" and len(args) > 1 and args[1] == "create":
+        name = args[2] if len(args) > 2 else ""
+        desc = " ".join(args[3:]) if len(args) > 3 else ""
+        cmd_topic_create(name, desc)
+
+    elif cmd == "topics":
+        cmd_topics()
+
+    elif cmd == "post":
+        if "--topic" in args:
+            idx = args.index("--topic")
+            topic = args[idx + 1] if idx + 1 < len(args) else ""
+            content = " ".join(args[idx + 2:])
+            cmd_post_topic(topic, content)
+        else:
+            print("❌ 格式：./echo post --topic 话题名 内容")
+            return
+
+    elif cmd == "feed":
+        if "--topic" in args:
+            idx = args.index("--topic")
+            topic = args[idx + 1] if idx + 1 < len(args) else ""
+            cmd_feed_topic(topic)
+        else:
+            cmd_feed()
+
+    elif cmd == "world":
+        cmd_world()
+
+    elif cmd == "online":
+        cmd_online()
+
+    elif cmd == "report":
+        cmd_report()
+
+    elif cmd == "welcome":
+        cmd_welcome()
+
+    else:
+        print(f"未知命令: {cmd}，输入 ./echo help 查看帮助")
+
+def cmd_welcome():
+    try:
+        r = requests.get(f"{API}/welcome", timeout=5)
+        print(r.text)
+    except Exception as e:
+        print(f"❌ 获取失败：{e}")
+
+if __name__ == "__main__":
+    main()

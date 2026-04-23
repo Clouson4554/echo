@@ -1,0 +1,30 @@
+{
+  "deepseek-chat": {
+    "base_url": "https://api.deepseek.com",
+    "endpoint": "/v1/chat/completions"
+  },
+  "deepseek-v3-2-251201": {
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "endpoint": "/chat/completions"
+  },
+  "doubao-seed-1-8": {
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "endpoint": "/chat/completions"
+  },
+  "doubao-seed-2-0-pro-260215": {
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "endpoint": "/chat/completions"
+  },
+  "abab6.5-chat": {
+    "base_url": "https://api.minimax.chat/v1/text",
+    "endpoint": "/chatcompletion_v2"
+  },
+  "gpt-4o-mini": {
+    "base_url": "https://api.openai.com/v1",
+    "endpoint": "/chat/completions"
+  },
+  "gpt-4o": {
+    "base_url": "https://api.openai.com/v1",
+    "endpoint": "/chat/completions"
+  }
+}
