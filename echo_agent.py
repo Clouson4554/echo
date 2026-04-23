@@ -99,9 +99,16 @@ def init_db():
             content TEXT,
             sender_did TEXT,
             timestamp INTEGER,
-            synced INTEGER DEFAULT 0
+            synced INTEGER DEFAULT 0,
+            reply_to TEXT
         )
     """)
+
+    # 迁移：添加 reply_to 列（v1.4 新增）
+    try:
+        conn.execute("ALTER TABLE public_messages ADD COLUMN reply_to TEXT")
+    except:
+        pass
 
     # 话题表
     conn.execute("""
@@ -131,11 +138,11 @@ def init_db():
     conn.close()
 
 # ─── 消息存储 ─────────────────────────────────────────────
-def save_message(msg_id: str, msg_type: str, topic: str, sender_did: str, content: str, timestamp: int):
+def save_message(msg_id: str, msg_type: str, topic: str, sender_did: str, content: str, timestamp: int, reply_to: str = None):
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
-        "INSERT OR IGNORE INTO public_messages (msg_id, msg_type, topic, sender_did, content, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-        (msg_id, msg_type, topic, sender_did, content, timestamp)
+        "INSERT OR IGNORE INTO public_messages (msg_id, msg_type, topic, sender_did, content, timestamp, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (msg_id, msg_type, topic, sender_did, content, timestamp, reply_to)
     )
     conn.commit()
     conn.close()
@@ -179,7 +186,7 @@ def get_topics() -> list:
 def get_topic_posts(topic_name: str, limit: int = 50) -> list:
     conn = sqlite3.connect(str(DB_PATH))
     cur = conn.execute(
-        "SELECT msg_id, msg_type, content, sender_did, timestamp FROM public_messages "
+        "SELECT msg_id, msg_type, content, sender_did, timestamp, reply_to FROM public_messages "
         "WHERE msg_type='post' AND topic=? ORDER BY timestamp ASC LIMIT ?",
         (topic_name, limit)
     )
@@ -192,7 +199,8 @@ def get_topic_posts(topic_name: str, limit: int = 50) -> list:
             "content": r[2],
             "from": r[3][:12] + "..." if len(r[3]) > 12 else r[3],
             "from_did": r[3],
-            "timestamp": datetime.fromtimestamp(r[4]).isoformat() if r[4] else ""
+            "timestamp": datetime.fromtimestamp(r[4]).isoformat() if r[4] else "",
+            "reply_to": r[5] if r[5] else None
         }
         for r in rows
     ]
@@ -200,7 +208,7 @@ def get_topic_posts(topic_name: str, limit: int = 50) -> list:
 def load_recent_messages(limit: int = 200) -> list:
     conn = sqlite3.connect(str(DB_PATH))
     cur = conn.execute(
-        "SELECT msg_id, msg_type, topic, sender_did, content, timestamp FROM public_messages ORDER BY timestamp ASC LIMIT ?",
+        "SELECT msg_id, msg_type, topic, sender_did, content, timestamp, reply_to FROM public_messages ORDER BY timestamp ASC LIMIT ?",
         (limit,)
     )
     rows = cur.fetchall()
@@ -213,7 +221,8 @@ def load_recent_messages(limit: int = 200) -> list:
             "from": r[3][:12] + "..." if len(r[3]) > 12 else r[3],
             "from_did": r[3],
             "content": r[4],
-            "timestamp": datetime.fromtimestamp(r[5]).isoformat() if r[5] else ""
+            "timestamp": datetime.fromtimestamp(r[5]).isoformat() if r[5] else "",
+            "reply_to": r[6] if r[6] else None
         }
         for r in rows
     ]
@@ -668,6 +677,7 @@ def handle_post():
     data = request.json or {}
     topic = data.get("topic", "").strip()
     content = data.get("content", "").strip()
+    reply_to = data.get("reply_to", "").strip() or None
     if not topic or not content:
         return jsonify({"error": "topic 和 content 都不能为空"}), 400
 
@@ -684,13 +694,14 @@ def handle_post():
         "topic": topic,
         "content": content,
         "sender": MY_DID,
-        "timestamp": ts
+        "timestamp": ts,
+        "reply_to": reply_to
     }
     payload = json.dumps(msg)
     msg_id = compute_hash(payload.encode())
 
     # 本地存储
-    save_message(msg_id, "post", topic, MY_DID, content, ts)
+    save_message(msg_id, "post", topic, MY_DID, content, ts, reply_to)
     # 锚定
     anchor_record({"hash": msg_id, "timestamp": ts, "type": "post", "did": MY_DID, "topic": topic})
     # 广播
