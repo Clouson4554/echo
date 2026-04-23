@@ -336,10 +336,18 @@ def on_connect(client, userdata, flags, rc, properties=None):
     else:
         logger.warning(f"⚠️ MQTT 连接失败，rc={rc}")
 
-def on_disconnect(client, userdata, rc, properties=None):
+def on_disconnect(client, userdata, flags_or_rc, rc=None, properties=None):
     global current_broker_index, mqtt_client
-    client._connected = False
-    logger.warning(f"⚠️ MQTT 断开 (rc={rc})，切换备用 Broker...")
+    # v2: flags_or_rc is DisconnectFlags, rc is the real reason code
+    # v1/v3 compat: flags_or_rc is rc
+    if hasattr(flags_or_rc, 'rc'):  # DisconnectFlags (v2+)
+        real_rc = rc
+        client._connected = False
+        logger.warning(f"⚠️ MQTT 断开 (rc={real_rc})，切换备用 Broker...")
+    else:  # older style (rc only)
+        real_rc = flags_or_rc
+        client._connected = False
+        logger.warning(f"⚠️ MQTT 断开 (rc={real_rc})，切换备用 Broker...")
     current_broker_index = (current_broker_index + 1) % len(BROKER_LIST)
     broker = BROKER_LIST[current_broker_index]
     logger.info(f"📡 尝试连接 {broker['host']}:{broker['port']}...")
