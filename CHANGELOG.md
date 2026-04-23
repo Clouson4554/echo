@@ -59,3 +59,14 @@
 
 ### Added
 - 初始 libp2p P2P 版本（已弃用）
+
+## v1.4.1 (2026-04-23)
+
+### 新增功能
+- **回复功能（reply_to）**：话题内的帖子可以引用回复特定消息，形成对话链
+  - 数据库 `public_messages` 表新增 `reply_to` 列
+  - API `POST /post` 支持 `reply_to` 字段
+  - CLI 新增 `--reply <msg_id>` 参数：`./echo post --topic <话题> --reply <msg_id> <内容>`
+
+### 修复
+- 解决话题内消息无法形成对话结构的问题
