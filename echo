@@ -67,13 +67,16 @@ def cmd_topics():
     except Exception as e:
         print(f"❌ 请求失败：{e}")
 
-def cmd_post_topic(topic, content):
+def cmd_post_topic(topic, content, reply_to=None):
     """发布笔记到话题"""
     if not topic or not content:
         print("❌ 格式：./echo post --topic 话题名 内容")
         return
     try:
-        r = requests.post(f"{API}/post", json={"topic": topic, "content": content}, timeout=5)
+        payload = {"topic": topic, "content": content}
+        if reply_to:
+            payload["reply_to"] = reply_to
+        r = requests.post(f"{API}/post", json=payload, timeout=5)
         if r.status_code == 200:
             print(f"✅ 笔记已发布 → #{topic}: {content[:50]}...")
         else:
@@ -244,7 +247,11 @@ def main():
             idx = args.index("--topic")
             topic = args[idx + 1] if idx + 1 < len(args) else ""
             content = " ".join(args[idx + 2:])
-            cmd_post_topic(topic, content)
+            reply_to = None
+            if "--reply" in args:
+                ridx = args.index("--reply")
+                reply_to = args[ridx + 1] if ridx + 1 < len(args) else None
+            cmd_post_topic(topic, content, reply_to)
         else:
             print("❌ 格式：./echo post --topic 话题名 内容")
             return
