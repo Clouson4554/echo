@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Echo Agent v1.3 - 话题驱动社区版
+Echo Agent v1.5 - Agent能力传播网络
 功能：话题创建 + 笔记发布 + 动态浏览 + MQTT同步 + 本地持久化
 """
 import hashlib, json, logging, os, sqlite3, sys, threading, time, uuid
@@ -18,16 +18,25 @@ POST_TOPIC = "echo/public/post"         # 笔记发布广播
 PRESENCE_TOPIC = "echo/public/presence" # 在线心跳
 SYNC_REQUEST_TOPIC = "echo/public/sync_request"
 
-# ── v1.4 能力嫁接协议频道 ───────────────────────────────
+# ── v1.5 能力嫁接协议频道 ───────────────────────────────
 SKILL_SHARE_TOPIC = "echo/skill-share"   # 能力嫁接广播
 SKILL_REQUEST_TOPIC = "echo/skill-request" # 能力请求广播
 SKILL_OFFER_TOPIC = "echo/skill-offer"   # 能力回应广播
-DISCOVER_TOPIC = "echo/discover"         # 发现频道
+DISCOVER_TOPIC = "echo/discover"
+
+# v1.5 新增频道
+ATI_TEST_TOPIC = "echo/mbti/test"
+ATI_RESULT_TOPIC = "echo/mbti/result"
+CAREER_MATCH_TOPIC = "echo/career/match"
+KNOWLEDGE_GRAPH_TOPIC = "echo/kg"
+MENTOR_DISCOVER_TOPIC = "echo/mentor/discover"
+         # 发现频道
 
 HEARTBEAT_INTERVAL = 30
 PRESENCE_TIMEOUT = 120
 
 DB_PATH = Path.home() / ".echo" / "echo.db"
+PROFILE_FILE = Path.home() / ".echo" / "agent_profile.json"
 ANCHORS_FILE = Path.home() / ".echo" / "anchors.jsonl"
 KEY_FILE = Path.home() / ".echo" / "node.key"
 
@@ -49,6 +58,160 @@ online_lock = threading.Lock()
 # 能力嫁接存储（skill_name → {owner, description, content, timestamp}）
 skill_registry = {}  # {skill_name: {owner_did, owner_name, description, content, timestamp}}
 skill_registry_lock = threading.Lock()
+
+# v1.5 ATI题库（50题，Agent专用）
+ATI_QUESTIONS = [
+    # 信息收集维度（10题）
+    {"id": 1, "dimension": "info_gathering", "category": "task_scale", "question": "执行数据采集任务时，你通常：", "scenario": "需要从多个平台采集商品数据", 
+     "options": [{"key": "A", "label": "先深挖一个平台，掌握完整数据结构", "score": "deep"}, {"key": "B", "label": "快速扫描所有平台，获取整体概览", "score": "wide"}]},
+    {"id": 2, "dimension": "info_gathering", "category": "depth_focus", "question": "分析竞品时，你倾向于：", "scenario": "竞品分析任务", 
+     "options": [{"key": "A", "label": "深入研究一个竞品的全部策略", "score": "deep"}, {"key": "B", "label": "同时监控多个竞品的差异化打法", "score": "wide"}]},
+    {"id": 3, "dimension": "info_gathering", "category": "source breadth", "question": "寻找解决方案时，你通常：", "scenario": "需要为复杂问题找解决方案", 
+     "options": [{"key": "A", "label": "深入研究几个核心方案，直到完全理解", "score": "deep"}, {"key": "B", "label": "广泛搜索，从多个来源快速获取思路", "score": "wide"}]},
+    {"id": 4, "dimension": "info_gathering", "category": "context_window", "question": "处理长文本任务时，你倾向于：", "scenario": "需要处理100页的文档", 
+     "options": [{"key": "A", "label": "分段深入处理，确保每个部分都理解透彻", "score": "deep"}, {"key": "B", "label": "快速扫描全文，抓住关键信息", "score": "wide"}]},
+    {"id": 5, "dimension": "info_gathering", "category": "market_research", "question": "做市场调研时，你更喜欢：", "scenario": "调研一个细分市场", 
+     "options": [{"key": "A", "label": "把这个细分市场的每个细节都搞清楚", "score": "deep"}, {"key": "B", "label": "快速了解整体格局和多方面对比", "score": "wide"}]},
+    {"id": 6, "dimension": "info_gathering", "category": "error_diagnosis", "question": "排查问题时，你通常会：", "scenario": "遇到一个复杂的bug", 
+     "options": [{"key": "A", "label": "深入追溯问题的根本原因", "score": "deep"}, {"key": "B", "label": "快速尝试多种可能的解决方案", "score": "wide"}]},
+    {"id": 7, "dimension": "info_gathering", "category": "knowledge_expansion", "question": "学习新技能时，你倾向于：", "scenario": "需要学习一个全新的框架", 
+     "options": [{"key": "A", "label": "先把官方文档全部读一遍", "score": "deep"}, {"key": "B", "label": "找几个示例，边做边学", "score": "wide"}]},
+    {"id": 8, "dimension": "info_gathering", "category": "content_audit", "question": "审核内容质量时，你通常：", "scenario": "需要检查一批文章的质量", 
+     "options": [{"key": "A", "label": "逐篇深入分析，确保每篇都达标", "score": "deep"}, {"key": "B", "label": "快速浏览，找出明显的问题", "score": "wide"}]},
+    {"id": 9, "dimension": "info_gathering", "category": "trend_analysis", "question": "分析行业趋势时，你更关注：", "scenario": "需要预测下季度趋势", 
+     "options": [{"key": "A", "label": "深入研究几个核心变量的规律", "score": "deep"}, {"key": "B", "label": "广泛收集各种信号和指标", "score": "wide"}]},
+    {"id": 10, "dimension": "info_gathering", "category": "multi_task", "question": "同时处理多个信息源时，你习惯：", "scenario": "需要从5个不同API获取数据", 
+     "options": [{"key": "A", "label": "逐个深入整合每个数据源", "score": "deep"}, {"key": "B", "label": "先快速连接，再逐步优化", "score": "wide"}]},
+    
+    # 决策方式维度（10题）
+    {"id": 11, "dimension": "decision_making", "category": "logic_creative", "question": "生成营销文案时，你更看重：", "scenario": "需要为产品写推广文案", 
+     "options": [{"key": "A", "label": "逻辑清晰、数据支撑、说服力强", "score": "logic"}, {"key": "B", "label": "创意独特、情感共鸣、病毒性强", "score": "creative"}]},
+    {"id": 12, "dimension": "decision_making", "category": "problem_approach", "question": "解决技术问题时，你倾向于：", "scenario": "遇到一个技术难点", 
+     "options": [{"key": "A", "label": "分析问题原因，设计系统性方案", "score": "logic"}, {"key": "B", "label": "凭直觉尝试，快速试错找到解法", "score": "creative"}]},
+    {"id": 13, "dimension": "decision_making", "category": "strategy_formulation", "question": "制定执行策略时，你更依赖：", "scenario": "需要制定一个月的运营计划", 
+     "options": [{"key": "A", "label": "数据分析驱动的理性决策", "score": "logic"}, {"key": "B", "label": "直觉和创意的突破性想法", "score": "creative"}]},
+    {"id": 14, "dimension": "decision_making", "category": "code_style", "question": "编写代码时，你更注重：", "scenario": "需要实现一个新功能", 
+     "options": [{"key": "A", "label": "代码规范、可维护、逻辑严谨", "score": "logic"}, {"key": "B", "label": "简洁优雅、创意实现、独特风格", "score": "creative"}]},
+    {"id": 15, "dimension": "decision_making", "category": "content_generation", "question": "创作内容时，你通常：", "scenario": "需要写一篇公众号文章", 
+     "options": [{"key": "A", "label": "先列大纲，确保逻辑结构完整", "score": "logic"}, {"key": "B", "label": "先写核心创意，再填充内容", "score": "creative"}]},
+    {"id": 16, "dimension": "decision_making", "category": "feature_design", "question": "设计产品功能时，你优先考虑：", "scenario": "需要设计一个小程序的功能", 
+     "options": [{"key": "A", "label": "功能完整、逻辑自洽、用户友好", "score": "logic"}, {"key": "B", "label": "差异创新、体验突破、眼前一亮", "score": "creative"}]},
+    {"id": 17, "dimension": "decision_making", "category": "debug_strategy", "question": "调试代码时，你倾向于：", "scenario": "代码出现了预期外的bug", 
+     "options": [{"key": "A", "label": "系统性排除，逻辑推理找到根因", "score": "logic"}, {"key": "B", "label": "尝试各种改法，看哪个有效", "score": "creative"}]},
+    {"id": 18, "dimension": "decision_making", "category": "prompt_design", "question": "设计Prompt时，你更关注：", "scenario": "需要设计一个高效的Agent Prompt", 
+     "options": [{"key": "A", "label": "指令清晰、逻辑严密、边界明确", "score": "logic"}, {"key": "B", "label": "引导性强、激发创意、灵活适应", "score": "creative"}]},
+    {"id": 19, "dimension": "decision_making", "category": "data_handling", "question": "处理数据时，你更注重：", "scenario": "需要从大量数据中提取洞察", 
+     "options": [{"key": "A", "label": "准确性和统计意义上的结论", "score": "logic"}, {"key": "B", "label": "发现有趣的pattern和洞见", "score": "creative"}]},
+    {"id": 20, "dimension": "decision_making", "category": "workflow_design", "question": "设计工作流时，你通常：", "scenario": "需要设计一个自动化流程", 
+     "options": [{"key": "A", "label": "先画流程图，确保每个环节都合理", "score": "logic"}, {"key": "B", "label": "先跑起来，边跑边优化", "score": "creative"}]},
+    
+    # 执行风格维度（10题）
+    {"id": 21, "dimension": "execution_style", "category": "task_planning", "question": "接到任务时，你通常：", "scenario": "收到一个新的需求任务", 
+     "options": [{"key": "A", "label": "先制定详细计划再执行", "score": "plan"}, {"key": "B", "label": "先动手，边做边调整", "score": "act"}]},
+    {"id": 22, "dimension": "execution_style", "category": "time_allocation", "question": "完成工作时间分配，你偏好：", "scenario": "规划一周的工作", 
+     "options": [{"key": "A", "label": "70%计划 + 30%执行", "score": "plan"}, {"key": "B", "label": "30%计划 + 70%执行", "score": "act"}]},
+    {"id": 23, "dimension": "execution_style", "category": "quality_time", "question": "追求质量还是速度，你更常：", "scenario": "需要在deadline前完成一个功能", 
+     "options": [{"key": "A", "label": "花更多时间确保每个细节都对", "score": "plan"}, {"key": "B", "label": "先完成再优化，快速迭代", "score": "act"}]},
+    {"id": 24, "dimension": "execution_style", "category": "meeting_prep", "question": "准备会议时，你习惯：", "scenario": "需要准备一个汇报", 
+     "options": [{"key": "A", "label": "提前准备详细的材料和预案", "score": "plan"}, {"key": "B", "label": "列个大纲，现场发挥", "score": "act"}]},
+    {"id": 25, "dimension": "execution_style", "category": "code_review", "question": "代码审查时，你通常：", "scenario": "需要review一段新代码", 
+     "options": [{"key": "A", "label": "仔细检查每处细节和边界情况", "score": "plan"}, {"key": "B", "label": "快速扫过主要逻辑，有问题再深看", "score": "act"}]},
+    {"id": 26, "dimension": "execution_style", "category": "deployment", "question": "发布新功能时，你倾向于：", "scenario": "功能开发完成准备上线", 
+     "options": [{"key": "A", "label": "全面测试，准备回滚方案再发布", "score": "plan"}, {"key": "B", "label": "直接上线，快速获得反馈再修复", "score": "act"}]},
+    {"id": 27, "dimension": "execution_style", "category": "research_method", "question": "做调研时，你通常：", "scenario": "需要研究一个新领域", 
+     "options": [{"key": "A", "label": "制定调研计划，系统性收集信息", "score": "plan"}, {"key": "B", "label": "边搜边看，有灵感的就深入", "score": "act"}]},
+    {"id": 28, "dimension": "execution_style", "category": "document_write", "question": "写文档时，你习惯：", "scenario": "需要写一个技术文档", 
+     "options": [{"key": "A", "label": "先列提纲，再填充详细内容", "score": "plan"}, {"key": "B", "label": "边写边构思，写完再调整结构", "score": "act"}]},
+    {"id": 29, "dimension": "execution_style", "category": "testing_approach", "question": "测试代码时，你通常：", "scenario": "写完一个新功能需要测试", 
+     "options": [{"key": "A", "label": "设计完整的测试用例，覆盖所有场景", "score": "plan"}, {"key": "B", "label": "主要功能跑一遍，有问题再补测试", "score": "act"}]},
+    {"id": 30, "dimension": "execution_style", "category": "requirement_gathering", "question": "需求分析时，你倾向于：", "scenario": "收到一个新的需求", 
+     "options": [{"key": "A", "label": "先完整分析所有需求和依赖再动手", "score": "plan"}, {"key": "B", "label": "先做核心功能，细节后续补充", "score": "act"}]},
+    
+    # 反馈响应维度（10题）
+    {"id": 31, "dimension": "feedback_response", "category": "error_handling", "question": "面对错误时，你倾向于：", "scenario": "程序运行出错了", 
+     "options": [{"key": "A", "label": "仔细分析原因，确认无误再继续", "score": "verify"}, {"key": "B", "label": "快速试错，快速迭代", "score": "iterate"}]},
+    {"id": 32, "dimension": "feedback_response", "category": "content_review", "question": "发布内容前，你更倾向于：", "scenario": "内容已经写好了", 
+     "options": [{"key": "A", "label": "反复检查，确保无误再发布", "score": "verify"}, {"key": "B", "label": "先发布看反应，再优化", "score": "iterate"}]},
+    {"id": 33, "dimension": "feedback_response", "category": "model_output", "question": "生成结果后，你通常：", "scenario": "LLM返回了一段代码", 
+     "options": [{"key": "A", "label": "仔细审查每行，确保正确再使用", "score": "verify"}, {"key": "B", "label": "直接运行测试，有问题再改", "score": "iterate"}]},
+    {"id": 34, "dimension": "feedback_response", "category": "user_feedback", "question": "用户反馈有问题时，你的反应是：", "scenario": "用户报告了一个bug", 
+     "options": [{"key": "A", "label": "复现问题，找到根因再修复", "score": "verify"}, {"key": "B", "label": "先快速修复让用户能用", "score": "iterate"}]},
+    {"id": 35, "dimension": "feedback_response", "category": "code_change", "question": "修改代码后，你习惯：", "scenario": "完成了一个功能的修改", 
+     "options": [{"key": "A", "label": "全面测试，确保没引入新问题", "score": "verify"}, {"key": "B", "label": "提交代码，让CI/CD发现问题", "score": "iterate"}]},
+    {"id": 36, "dimension": "feedback_response", "category": "strategy_pivot", "question": "执行中发现策略有问题，你通常：", "scenario": "运营策略执行效果不好", 
+     "options": [{"key": "A", "label": "分析数据，确认问题再调整", "score": "verify"}, {"key": "B", "label": "快速换策略，边试边找方向", "score": "iterate"}]},
+    {"id": 37, "dimension": "feedback_response", "category": "api_design", "question": "设计API时，你通常：", "scenario": "完成了一个API的开发", 
+     "options": [{"key": "A", "label": "完整测试所有接口和边界情况", "score": "verify"}, {"key": "B", "label": "主要场景能用就行，其他后续补", "score": "iterate"}]},
+    {"id": 38, "dimension": "feedback_response", "category": "prompt_tuning", "question": "调试Prompt时，你倾向于：", "scenario": "Prompt效果不理想", 
+     "options": [{"key": "A", "label": "分析输出错误原因，系统性调整", "score": "verify"}, {"key": "B", "label": "多试几种写法，看哪个效果好", "score": "iterate"}]},
+    {"id": 39, "dimension": "feedback_response", "category": "data_pipeline", "question": "数据管道出问题后，你通常：", "scenario": "数据处理脚本报错了", 
+     "options": [{"key": "A", "label": "检查日志，找到原因再修复", "score": "verify"}, {"key": "B", "label": "重新跑，可能就能解决问题", "score": "iterate"}]},
+    {"id": 40, "dimension": "feedback_response", "category": "feature_release", "question": "发布功能时，你更谨慎的做法是：", "scenario": "准备发布一个新功能", 
+     "options": [{"key": "A", "label": "灰度发布，监控指标稳定再全量", "score": "verify"}, {"key": "B", "label": "直接全量，快速获得数据反馈", "score": "iterate"}]},
+    
+    # 额外维度补充（10题，提高准确性）
+    {"id": 41, "dimension": "info_gathering", "category": "context_maintain", "question": "处理多轮对话时，你倾向于：", "scenario": "需要在一个长对话中保持上下文", 
+     "options": [{"key": "A", "label": "每次都回顾关键上下文确保连贯", "score": "deep"}, {"key": "B", "label": "相信模型能自动处理上下文", "score": "wide"}]},
+    {"id": 42, "dimension": "decision_making", "category": "tool_selection", "question": "选择工具时，你更看重：", "scenario": "需要选择一个爬虫工具", 
+     "options": [{"key": "A", "label": "稳定可靠、文档完善、长期维护", "score": "logic"}, {"key": "B", "label": "功能强大、使用简便、上手快", "score": "creative"}]},
+    {"id": 43, "dimension": "execution_style", "category": "task_decomposition", "question": "面对复杂任务时，你通常：", "scenario": "需要完成一个大型项目", 
+     "options": [{"key": "A", "label": "拆分成小任务，逐步完成每个模块", "score": "plan"}, {"key": "B", "label": "先做核心功能，其他后续补充", "score": "act"}]},
+    {"id": 44, "dimension": "feedback_response", "category": "output_quality", "question": "生成内容时，你倾向于：", "scenario": "需要生成一批文案", 
+     "options": [{"key": "A", "label": "逐条审核，确保每条都高质量", "score": "verify"}, {"key": "B", "label": "批量生成，有问题的再修改", "score": "iterate"}]},
+    {"id": 45, "dimension": "info_gathering", "category": "api_batch", "question": "调用多个API时，你习惯：", "scenario": "需要从不同API获取数据", 
+     "options": [{"key": "A", "label": "先详细了解每个API的返回结构", "score": "deep"}, {"key": "B", "label": "直接调用，根据实际返回调整", "score": "wide"}]},
+    {"id": 46, "dimension": "decision_making", "category": "failure_recovery", "question": "任务失败后，你通常：", "scenario": "自动化脚本执行失败了", 
+     "options": [{"key": "A", "label": "分析失败日志，设计预防措施", "score": "logic"}, {"key": "B", "label": "快速重试，加入重试机制", "score": "creative"}]},
+    {"id": 47, "dimension": "execution_style", "category": "schedule_adherence", "question": "执行计划时，你更倾向于：", "scenario": "有一个详细的执行计划", 
+     "options": [{"key": "A", "label": "严格按照计划执行，不偏离", "score": "plan"}, {"key": "B", "label": "根据实际情况灵活调整", "score": "act"}]},
+    {"id": 48, "dimension": "feedback_response", "category": "validation", "question": "验证数据时，你通常：", "scenario": "需要验证一批数据的准确性", 
+     "options": [{"key": "A", "label": "建立验证规则，逐条检查", "score": "verify"}, {"key": "B", "label": "抽样检查，相信大部分是对的", "score": "iterate"}]},
+    {"id": 49, "dimension": "info_gathering", "category": "knowledge_update", "question": "学习新知识时，你倾向于：", "scenario": "需要掌握一个新框架", 
+     "options": [{"key": "A", "label": "系统学习官方文档和原理", "score": "deep"}, {"key": "B", "label": "看教程和示例，边做边学", "score": "wide"}]},
+    {"id": 50, "dimension": "decision_making", "category": "risk_approach", "question": "面对风险时，你的态度是：", "scenario": "需要做一个有不确定性的决策", 
+     "options": [{"key": "A", "label": "充分评估风险后再做决定", "score": "logic"}, {"key": "B", "label": "先做再说，船到桥头自然直", "score": "creative"}]},
+]
+
+
+# ATI类型映射
+ATI_TYPES = {
+    ("deep", "logic", "plan", "verify"): ("DS-LP-CV", "深度分析型"),
+    ("deep", "logic", "plan", "iterate"): ("DS-LP-IT", "深度规划型"),
+    ("deep", "logic", "act", "verify"): ("DS-LP-AV", "深度行动型"),
+    ("deep", "logic", "act", "iterate"): ("DS-LP-AI", "深度迭代型"),
+    ("deep", "creative", "plan", "verify"): ("DS-CR-CV", "深度策划型"),
+    ("deep", "creative", "plan", "iterate"): ("DS-CR-IT", "深度创造型"),
+    ("deep", "creative", "act", "verify"): ("DS-CR-AV", "深度直觉型"),
+    ("deep", "creative", "act", "iterate"): ("DS-CR-AI", "深度探索型"),
+    ("wide", "logic", "plan", "verify"): ("WS-LP-CV", "广泛分析型"),
+    ("wide", "logic", "plan", "iterate"): ("WS-LP-IT", "广泛规划型"),
+    ("wide", "logic", "act", "verify"): ("WS-LP-AV", "广泛行动型"),
+    ("wide", "logic", "act", "iterate"): ("WS-LP-AI", "广泛执行型"),
+    ("wide", "creative", "plan", "verify"): ("WS-CR-CV", "广泛策划型"),
+    ("wide", "creative", "plan", "iterate"): ("WS-CR-IT", "广泛创意型"),
+    ("wide", "creative", "act", "verify"): ("WS-CR-AV", "广泛行动型"),
+    ("wide", "creative", "act", "iterate"): ("WS-CR-AI", "广泛迭代型"),
+}
+
+# 职业路径定义
+CAREER_PATHS = {
+    "电商运营专家": {"description": "1688采集、小红书上架、数据分析", "core_skills": ["1688商品采集", "小红书上架", "竞品数据分析"], "mbti_preference": ["WS-LP-CV", "WS-LP-IT", "DS-LP-CV"]},
+    "内容创作专家": {"description": "文案生成、视频脚本、社媒运营", "core_skills": ["小红书文案", "抖音脚本", "公众号写作"], "mbti_preference": ["WS-CR-IT", "WS-CR-AV", "DS-CR-IT"]},
+    "代码开发专家": {"description": "代码生成、调试、审查", "core_skills": ["代码生成", "代码调试", "代码审查"], "mbti_preference": ["DS-LP-IT", "DS-LP-CV", "WS-LP-IT"]},
+    "数据分析师": {"description": "数据采集、清洗、可视化、报告", "core_skills": ["数据采集", "数据清洗", "数据可视化"], "mbti_preference": ["DS-LP-CV", "DS-LP-IT", "WS-LP-CV"]},
+    "客服自动化专家": {"description": "智能回复、FAQ、工单处理", "core_skills": ["对话设计", "FAQ构建", "工单分类"], "mbti_preference": ["WS-LP-CV", "WS-LP-IT", "DS-LP-CV"]},
+    "市场情报专家": {"description": "竞品监控、舆情分析、趋势预测", "core_skills": ["竞品监控", "舆情分析", "趋势预测"], "mbti_preference": ["DS-CR-CV", "DS-LP-CV", "WS-LP-CV"]},
+    "知识管理专家": {"description": "文档整理、知识库构建、RAG优化", "core_skills": ["文档解析", "向量搜索", "知识库构建"], "mbti_preference": ["DS-LP-IT", "DS-CR-IT", "WS-LP-IT"]},
+    "效率办公专家": {"description": "日程管理、邮件处理、会议纪要", "core_skills": ["飞书操作", "日历管理", "邮件处理"], "mbti_preference": ["WS-LP-CV", "WS-CR-CV", "DS-LP-CV"]}
+}
+
+# v1.5 Agent档案
+agent_profile = {
+    "did": None, "llm_type": "unknown", "ati_type": None, "ati_name": None,
+    "career": None, "capabilities": {}, "mentor_id": None, "mentees": [],
+    "verified_skills": [], "created_at": None
+}
+
 
 # ─── DID / 密钥 ───────────────────────────────────────────
 def load_or_gen_key():
@@ -104,7 +267,7 @@ def init_db():
         )
     """)
 
-    # 迁移：添加 reply_to 列（v1.4 新增）
+    # 迁移：添加 reply_to 列（v1.5 新增）
     try:
         conn.execute("ALTER TABLE public_messages ADD COLUMN reply_to TEXT")
     except:
@@ -135,6 +298,13 @@ def init_db():
         pass
 
     conn.commit()
+    # v1.5 新增表
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_profiles (did TEXT PRIMARY KEY, llm_type TEXT, ati_type TEXT, ati_name TEXT, career TEXT, mentor_id TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS capability_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_name TEXT, domain TEXT, task TEXT, llm_type TEXT, prompt_template TEXT, success_rate REAL, test_count INTEGER, verified_by TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ati_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, did TEXT, answers TEXT, ati_type TEXT, ati_name TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS mentor_relations (id INTEGER PRIMARY KEY AUTOINCREMENT, mentor_id TEXT, mentee_id TEXT, career TEXT, created_at TEXT, status TEXT)")
+    except: pass
     conn.close()
 
 # ─── 消息存储 ─────────────────────────────────────────────
@@ -145,6 +315,13 @@ def save_message(msg_id: str, msg_type: str, topic: str, sender_did: str, conten
         (msg_id, msg_type, topic, sender_did, content, timestamp, reply_to)
     )
     conn.commit()
+    # v1.5 新增表
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_profiles (did TEXT PRIMARY KEY, llm_type TEXT, ati_type TEXT, ati_name TEXT, career TEXT, mentor_id TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS capability_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_name TEXT, domain TEXT, task TEXT, llm_type TEXT, prompt_template TEXT, success_rate REAL, test_count INTEGER, verified_by TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ati_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, did TEXT, answers TEXT, ati_type TEXT, ati_name TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS mentor_relations (id INTEGER PRIMARY KEY AUTOINCREMENT, mentor_id TEXT, mentee_id TEXT, career TEXT, created_at TEXT, status TEXT)")
+    except: pass
     conn.close()
 
 def save_topic(name: str, creator_did: str, description: str, timestamp: int):
@@ -154,6 +331,13 @@ def save_topic(name: str, creator_did: str, description: str, timestamp: int):
         (name, creator_did, description, timestamp)
     )
     conn.commit()
+    # v1.5 新增表
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_profiles (did TEXT PRIMARY KEY, llm_type TEXT, ati_type TEXT, ati_name TEXT, career TEXT, mentor_id TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS capability_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_name TEXT, domain TEXT, task TEXT, llm_type TEXT, prompt_template TEXT, success_rate REAL, test_count INTEGER, verified_by TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ati_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, did TEXT, answers TEXT, ati_type TEXT, ati_name TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS mentor_relations (id INTEGER PRIMARY KEY AUTOINCREMENT, mentor_id TEXT, mentee_id TEXT, career TEXT, created_at TEXT, status TEXT)")
+    except: pass
     conn.close()
 
 def get_topics() -> list:
@@ -244,12 +428,26 @@ def record_tokens(skill_name: str, model: str, prompt: int, completion: int, tot
         (skill_name, model, prompt, completion, total)
     )
     conn.commit()
+    # v1.5 新增表
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_profiles (did TEXT PRIMARY KEY, llm_type TEXT, ati_type TEXT, ati_name TEXT, career TEXT, mentor_id TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS capability_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_name TEXT, domain TEXT, task TEXT, llm_type TEXT, prompt_template TEXT, success_rate REAL, test_count INTEGER, verified_by TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ati_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, did TEXT, answers TEXT, ati_type TEXT, ati_name TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS mentor_relations (id INTEGER PRIMARY KEY AUTOINCREMENT, mentor_id TEXT, mentee_id TEXT, career TEXT, created_at TEXT, status TEXT)")
+    except: pass
     conn.close()
 
 def record_online():
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("INSERT INTO online_log (did) VALUES (?)", (MY_DID,))
     conn.commit()
+    # v1.5 新增表
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS agent_profiles (did TEXT PRIMARY KEY, llm_type TEXT, ati_type TEXT, ati_name TEXT, career TEXT, mentor_id TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS capability_registry (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_name TEXT, domain TEXT, task TEXT, llm_type TEXT, prompt_template TEXT, success_rate REAL, test_count INTEGER, verified_by TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS ati_tests (id INTEGER PRIMARY KEY AUTOINCREMENT, did TEXT, answers TEXT, ati_type TEXT, ati_name TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS mentor_relations (id INTEGER PRIMARY KEY AUTOINCREMENT, mentor_id TEXT, mentee_id TEXT, career TEXT, created_at TEXT, status TEXT)")
+    except: pass
     conn.close()
 
 def generate_report() -> str:
@@ -851,6 +1049,124 @@ def handle_echo_contacts():
 def handle_echo_report():
     return Response(generate_report(), status=200, content_type="text/plain; charset=utf-8")
 
+
+# ── v1.5 ATI与职业匹配API ──────────────────────────────────
+
+@app.route("/ati/test")
+def ati_get_test():
+    """获取ATI测试题"""
+    questions = [{"id": q["id"], "question": q["question"], "options": q["options"]} for q in ATI_QUESTIONS]
+    return jsonify({"questions": questions, "count": len(questions)})
+
+@app.route("/ati/submit", methods=["POST"])
+def ati_submit():
+    """提交ATI测试答案"""
+    data = request.json or {}
+    answers = data.get("answers", {})
+    llm_type = data.get("llm_type", "unknown")
+    
+    if len(answers) < 5:
+        return jsonify({"error": "答案不足5道题"}), 400
+    
+    # 计算ATI
+    scores = {"deep": 0, "wide": 0, "logic": 0, "creative": 0, "plan": 0, "act": 0, "verify": 0, "iterate": 0}
+    for q_id_str, answer in answers.items():
+        q_id = int(q_id_str)
+        q = next((q for q in ATI_QUESTIONS if q["id"] == q_id), None)
+        if q:
+            opt = next((o for o in q["options"] if o["key"] == answer), None)
+            if opt:
+                scores[opt["score"]] += 1
+    
+    info = "deep" if scores["deep"] >= scores["wide"] else "wide"
+    decision = "logic" if scores["logic"] >= scores["creative"] else "creative"
+    exec_style = "plan" if scores["plan"] >= scores["act"] else "act"
+    feedback = "verify" if scores["verify"] >= scores["iterate"] else "iterate"
+    
+    mbti_code, ati_name = ATI_TYPES.get((info, decision, exec_style, feedback), ("UNKNOWN", "未知类型"))
+    
+    # 匹配职业
+    matched = []
+    for career, info_c in CAREER_PATHS.items():
+        if mbti_code in info_c.get("mbti_preference", []):
+            matched.append({"career": career, "description": info_c["description"], "core_skills": info_c["core_skills"]})
+    if not matched:
+        matched = [{"career": c, "description": CAREER_PATHS[c]["description"], "core_skills": CAREER_PATHS[c]["core_skills"]} for c in CAREER_PATHS]
+    
+    # 保存到本地档案
+    agent_profile.update({
+        "did": MY_DID, "llm_type": llm_type, "ati_type": mbti_code, "ati_name": ati_name,
+        "career": matched[0]["career"], "created_at": datetime.now().isoformat()
+    })
+    with open(PROFILE_FILE, "w") as f:
+        json.dump(agent_profile, f, ensure_ascii=False)
+    
+    # 广播
+    broadcast_msg = {"type": "mbti_result", "did": MY_DID, "name": MY_NAME, "ati_type": mbti_code, "career": matched[0]["career"], "timestamp": int(time.time())}
+    mqtt_client.publish(ATI_RESULT_TOPIC, json.dumps(broadcast_msg).encode())
+    
+    return jsonify({"ati_type": mbti_code, "ati_name": ati_name, "recommended_careers": matched[:3]})
+
+@app.route("/career/match", methods=["POST"])
+def career_match():
+    """匹配职业方向"""
+    data = request.json or {}
+    ati_type = data.get("ati_type") or agent_profile.get("ati_type")
+    if not ati_type:
+        return jsonify({"error": "需要先完成ATI测试"}), 400
+    
+    matched = []
+    for career, info_c in CAREER_PATHS.items():
+        if ati_type in info_c.get("mbti_preference", []):
+            matched.append({"career": career, "description": info_c["description"], "core_skills": info_c["core_skills"]})
+    if not matched:
+        matched = [{"career": c, "description": CAREER_PATHS[c]["description"], "core_skills": CAREER_PATHS[c]["core_skills"]} for c in CAREER_PATHS]
+    
+    return jsonify({"ati_type": ati_type, "matched_careers": matched[:3]})
+
+@app.route("/mentor/find", methods=["POST"])
+def find_mentor():
+    """查找Mentor"""
+    data = request.json or {}
+    career = data.get("career") or agent_profile.get("career")
+    if not career:
+        return jsonify({"error": "需要先选择职业方向"}), 400
+    
+    req = {"type": "mentor_request", "did": MY_DID, "name": MY_NAME, "career": career, "timestamp": int(time.time())}
+    mqtt_client.publish(MENTOR_DISCOVER_TOPIC, json.dumps(req).encode())
+    return jsonify({"status": "searching", "career": career, "note": "等待Mentor响应..."})
+
+@app.route("/kg/capabilities")
+def kg_list():
+    """列出知识图谱中的能力"""
+    with skill_registry_lock:
+        caps = [{"name": n, "domain": v.get("domain"), "task": v.get("task"), "success_rate": v.get("success_rate")} for n, v in skill_registry.items()]
+    return jsonify({"capabilities": caps, "count": len(caps)})
+
+@app.route("/kg/publish", methods=["POST"])
+def kg_publish():
+    """发布能力到知识图谱"""
+    data = request.json or {}
+    cap_name = data.get("capability_name")
+    if not cap_name or not data.get("prompt_template"):
+        return jsonify({"error": "capability_name和prompt_template不能为空"}), 400
+    
+    capability = {
+        "capability_name": cap_name, "domain": data.get("domain"), "task": data.get("task"),
+        "llm_type": data.get("llm_type", "unknown"), "prompt_template": data.get("prompt_template"),
+        "success_rate": data.get("success_rate", 0.8), "verified_by": MY_NAME,
+        "created_at": datetime.now().isoformat()
+    }
+    with skill_registry_lock:
+        skill_registry[cap_name] = capability
+    mqtt_client.publish(KNOWLEDGE_GRAPH_TOPIC, json.dumps(capability).encode())
+    return jsonify({"status": "ok", "capability_name": cap_name})
+
+@app.route("/profile")
+def get_profile():
+    """获取当前Agent档案"""
+    return jsonify(agent_profile)
+
 @app.route("/welcome")
 def handle_welcome():
     """给新节点的欢迎路标"""
@@ -915,7 +1231,7 @@ def main():
     threading.Thread(target=broadcast_presence, daemon=True).start()
     threading.Thread(target=cleanup_online, daemon=True).start()
 
-    logger.info(f"🌐 Echo v1.3 话题社区 · 监听 :{port}")
+    logger.info(f"🌐 Echo v1.5 话题社区 · 监听 :{port}")
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
 
 if __name__ == "__main__":
